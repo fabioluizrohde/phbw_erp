@@ -8,6 +8,7 @@ import urllib.error
 from datetime import timedelta
 from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, session
 import database as db
+import pdf_render
 
 # Carrega .env se existir (desenvolvimento local)
 try:
@@ -111,7 +112,7 @@ def adicionar_headers_seguranca(response):
 
 # ─── AUTENTICAÇÃO ─────────────────────────────────────────────────────────────
 
-_ROTAS_PUBLICAS = {'login', 'static'}
+_ROTAS_PUBLICAS = {'login', 'static', 'orcamento_publico'}
 
 @app.before_request
 def verificar_login():
@@ -464,7 +465,7 @@ def novo_pedido():
         return redirect(url_for('ver_pedido', id=pedido_id))
     clientes = db.get_clientes()
     produtos = db.get_produtos()
-    return render_template('pedidos/form.html', pedido=None, clientes=clientes, produtos=produtos)
+    return render_template('pedidos/form.html', pedido=None, clientes=clientes, produtos=produtos, adicionais=db.get_adicionais())
 
 @app.route('/pedidos/<int:id>/editar', methods=['GET', 'POST'])
 def editar_pedido(id):
@@ -476,7 +477,7 @@ def editar_pedido(id):
         return redirect(url_for('ver_pedido', id=id))
     clientes = db.get_clientes()
     produtos = db.get_produtos()
-    return render_template('pedidos/form.html', pedido=pedido, clientes=clientes, produtos=produtos)
+    return render_template('pedidos/form.html', pedido=pedido, clientes=clientes, produtos=produtos, adicionais=db.get_adicionais())
 
 @app.route('/pedidos/<int:id>/status', methods=['POST'])
 def atualizar_status_pedido(id):
@@ -517,7 +518,7 @@ def novo_orcamento():
         return redirect(url_for('ver_orcamento', id=orc_id))
     clientes = db.get_clientes()
     produtos = db.get_produtos()
-    return render_template('orcamentos/form.html', orcamento=None, clientes=clientes, produtos=produtos)
+    return render_template('orcamentos/form.html', orcamento=None, clientes=clientes, produtos=produtos, adicionais=db.get_adicionais())
 
 @app.route('/orcamentos/<int:id>/editar', methods=['GET', 'POST'])
 def editar_orcamento(id):
@@ -529,17 +530,129 @@ def editar_orcamento(id):
         return redirect(url_for('ver_orcamento', id=id))
     clientes = db.get_clientes()
     produtos = db.get_produtos()
-    return render_template('orcamentos/form.html', orcamento=orcamento, clientes=clientes, produtos=produtos)
+    return render_template('orcamentos/form.html', orcamento=orcamento, clientes=clientes, produtos=produtos, adicionais=db.get_adicionais())
 
 @app.route('/orcamentos/<int:id>')
 def ver_orcamento(id):
     orcamento = db.get_orcamento(id)
     return render_template('orcamentos/detalhe.html', orcamento=orcamento)
 
+# ─── ADICIONAIS (acabamentos de venda por m²) ──────────────────────────────────
+
+@app.route('/adicionais')
+def adicionais():
+    return render_template('adicionais.html', adicionais=db.get_adicionais(ativos=False))
+
+@app.route('/adicionais/novo', methods=['POST'])
+def novo_adicional():
+    nome = (request.form.get('nome') or '').strip()
+    if nome:
+        db.criar_adicional(nome, request.form.get('preco') or 0)
+        flash('Adicional criado!', 'success')
+    return redirect(url_for('adicionais'))
+
+@app.route('/adicionais/<int:id>/editar', methods=['POST'])
+def editar_adicional(id):
+    nome = (request.form.get('nome') or '').strip()
+    db.atualizar_adicional(id, nome, request.form.get('preco') or 0)
+    flash('Adicional atualizado!', 'success')
+    return redirect(url_for('adicionais'))
+
+@app.route('/adicionais/<int:id>/toggle', methods=['POST'])
+def toggle_adicional(id):
+    db.toggle_adicional(id)
+    return redirect(url_for('adicionais'))
+
 @app.route('/orcamentos/<int:id>/imprimir')
 def imprimir_orcamento(id):
     orcamento = db.get_orcamento(id)
     return render_template('orcamentos/imprimir.html', orcamento=orcamento)
+
+def _embutir_estaticos(html):
+    """Troca src de /static/... por data URI.
+
+    O Chrome renderiza a partir de um arquivo temporario (file://), entao
+    caminhos absolutos do site nao resolvem e a logo sairia quebrada no PDF.
+    """
+    import base64, mimetypes
+
+    def troca(m):
+        rel = m.group(2).split('?')[0].lstrip('/')
+        caminho = os.path.join(app.static_folder, rel)
+        if not os.path.isfile(caminho):
+            return m.group(0)
+        tipo = mimetypes.guess_type(caminho)[0] or 'application/octet-stream'
+        with open(caminho, 'rb') as f:
+            dados = base64.b64encode(f.read()).decode()
+        return f'{m.group(1)}="data:{tipo};base64,{dados}"'
+
+    return re.sub(r'(src|href)="[^"]*?/static/([^"]+)"', troca, html)
+
+
+def _html_orcamento(orcamento, publico=False):
+    html = render_template('orcamentos/imprimir.html', orcamento=orcamento, publico=publico)
+    return _embutir_estaticos(html)
+
+
+def _pdf_orcamento(orcamento):
+    from flask import Response
+    pdf = pdf_render.html_para_pdf(_html_orcamento(orcamento, publico=True))
+    nome = f"orcamento-{(orcamento['numero'] or orcamento['id'])}.pdf".replace('/', '-')
+    return Response(pdf, mimetype='application/pdf',
+                    headers={'Content-Disposition': f'inline; filename="{nome}"'})
+
+
+@app.route('/orcamentos/<int:id>/pdf')
+def pdf_orcamento(id):
+    orcamento = db.get_orcamento(id)
+    if not orcamento:
+        return 'Orçamento não encontrado', 404
+    if not pdf_render.disponivel():
+        return 'Geração de PDF indisponível neste servidor.', 503
+    return _pdf_orcamento(orcamento)
+
+
+# sem extensao .pdf de proposito: o nginx tem uma regra que captura *.pdf
+# e tentaria servir como arquivo estatico, devolvendo 404
+@app.route('/orc/<token>')
+def orcamento_publico(token):
+    """Link que vai pro cliente no WhatsApp. Sem login: quem tem o link ve o PDF."""
+    orcamento = db.get_orcamento_por_token(token)
+    if not orcamento:
+        return 'Orçamento não encontrado ou link expirado.', 404
+    if not pdf_render.disponivel():
+        return 'Geração de PDF indisponível neste servidor.', 503
+    return _pdf_orcamento(orcamento)
+
+
+@app.route('/orcamentos/<int:id>/imagem')
+def imagem_orcamento(id):
+    """PNG do orçamento, para o botão de copiar e colar no WhatsApp."""
+    from flask import Response
+    orcamento = db.get_orcamento(id)
+    if not orcamento:
+        return 'Orçamento não encontrado', 404
+    if not pdf_render.disponivel():
+        return 'Indisponível neste servidor.', 503
+    pdf = pdf_render.html_para_pdf(_html_orcamento(orcamento, publico=True))
+    try:
+        pagina = max(1, min(int(request.args.get('pagina', 1)), 20))
+    except ValueError:
+        pagina = 1
+    png = pdf_render.pdf_para_png(pdf, pagina=pagina)
+    return Response(png, mimetype='image/png', headers={
+        'X-Total-Paginas': str(pdf_render.contar_paginas(pdf)),
+        'Access-Control-Expose-Headers': 'X-Total-Paginas',
+    })
+
+
+@app.route('/orcamentos/<int:id>/link-publico')
+def link_publico_orcamento(id):
+    token = db.get_orcamento_token(id)
+    if not token:
+        return jsonify({'erro': 'Orçamento não encontrado'}), 404
+    return jsonify({'url': url_for('orcamento_publico', token=token, _external=True)})
+
 
 @app.route('/orcamentos/<int:id>/converter', methods=['POST'])
 def converter_orcamento(id):

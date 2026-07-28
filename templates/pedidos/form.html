@@ -210,11 +210,24 @@ document.getElementById('input-desconto').addEventListener('input', recalcular);
 
 // ─── BUSCA INTELIGENTE DE PRODUTO (autocomplete na linha de itens) ───────
 const PRODUTOS = {{ produtos|tojson }};
+const ADICIONAIS = {{ adicionais|tojson }};
 const UPLOADS_URL = "{{ url_for('static', filename='uploads/') }}";
 const elBuscaItem = document.getElementById('busca-item-produto');
 const elSugestoes = document.getElementById('sugestoes-produto');
 
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// Bloco de checkboxes de acabamentos (adicionais) mostrado no modal de item
+function adicionaisHtml() {
+  if (!ADICIONAIS || !ADICIONAIS.length) return '';
+  return `<div style="margin-top:14px;border-top:1px solid var(--borda);padding-top:12px;">
+    <p style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:700;margin-bottom:8px">Acabamentos <span style="text-transform:none;font-weight:400;color:#aaa">(somados por m²)</span></p>
+    ${ADICIONAIS.map(a => `<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px;cursor:pointer;">
+      <input type="checkbox" class="modal-adicional" data-nome="${escHtml(a.nome)}" data-preco="${a.preco}">
+      <span>${escHtml(a.nome)} <strong style="color:var(--primaria)">+R$ ${Number(a.preco).toFixed(2)}/m²</strong></span>
+    </label>`).join('')}
+  </div>`;
+}
 
 function renderSugestoes() {
   const q = elBuscaItem.value.trim().toLowerCase();
@@ -270,6 +283,9 @@ function abrirModalPreco(id, nome) {
       produtoSelecionado.faixas = ehDemanda ? (p.precos || []) : [];
       produtoSelecionado.ehMetro = ehMetro;
       produtoSelecionado.precoM2 = p.preco || 0;
+      // Produto por m² COM faixas (lona/adesivo): informa L×A -> área -> preço da faixa
+      const ehM2Faixa = ehDemanda && /m²|m2/i.test(p.unidade || '');
+      produtoSelecionado.ehM2Faixa = ehM2Faixa;
       let html = '';
       let qtdInicial = 1, precoInicial = p.preco || 0;
 
@@ -291,7 +307,7 @@ function abrirModalPreco(id, nome) {
               <input type="number" id="modal-qtd" class="form-control" value="1" min="1" step="1"></div>
             <div><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Preço por peça (R$)</label>
               <input type="number" id="modal-preco-unit" class="form-control" value="0" step="0.01" readonly style="background:#F8F9FA;"></div>
-          </div>`;
+          </div>${adicionaisHtml()}`;
         lucide.createIcons();
         return;
       }
@@ -306,18 +322,22 @@ function abrirModalPreco(id, nome) {
               <th style="padding:6px 10px;text-align:right;font-weight:600">Preço Unit.</th>
               <th style="padding:6px 10px"></th>
             </tr></thead><tbody>`;
+        const _un = ehM2Faixa ? 'm²' : 'un';
         p.precos.forEach(pc => {
           const mn = parseFloat(pc.qtd_min) || 1;
           const mx = pc.qtd_max ? parseFloat(pc.qtd_max) : null;
-          const faixaTxt = mx ? `${mn} a ${mx} un` : `${mn}+ ou mais`;
+          const faixaTxt = mx ? `${mn} a ${mx} ${_un}` : `${mn}+ ${_un}`;
+          const acao = ehM2Faixa ? `selecionarFaixaPreco(${pc.preco_venda})` : `selecionarPrecoPronto(${mn},${pc.preco_venda})`;
           html += `<tr style="border-bottom:1px solid var(--borda)">
             <td style="padding:8px 10px;font-weight:600">${faixaTxt}</td>
             <td style="padding:8px 10px;text-align:right;font-weight:700;color:var(--primaria)">R$ ${parseFloat(pc.preco_venda).toFixed(2)}</td>
-            <td style="padding:8px 10px"><button type="button" style="padding:4px 12px;background:var(--primaria);color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer" onclick="selecionarPrecoPronto(${mn},${pc.preco_venda})">Usar</button></td>
+            <td style="padding:8px 10px"><button type="button" style="padding:4px 12px;background:var(--primaria);color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer" onclick="${acao}">Usar</button></td>
           </tr>`;
         });
         html += '</tbody></table>';
-        html += '<p style="font-size:11px;color:#888;margin-top:6px">Digite a quantidade abaixo que o preço da faixa é aplicado automaticamente.</p></div>';
+        html += ehM2Faixa
+          ? '<p style="font-size:11px;color:#888;margin-top:6px">Informe o tamanho (L×A) abaixo — a faixa é aplicada pela metragem. Clique em "Usar" numa faixa pra forçar aquele preço.</p></div>'
+          : '<p style="font-size:11px;color:#888;margin-top:6px">Digite a quantidade abaixo que o preço da faixa é aplicado automaticamente.</p></div>';
         qtdInicial = parseFloat(p.precos[0].qtd_min) || 1;
         precoInicial = p.precos[0].preco_venda;
       } else if (p.precos && p.precos.length > 0 && p.tipo_preco !== 'fixo') {
@@ -342,16 +362,33 @@ function abrirModalPreco(id, nome) {
         qtdInicial = p.precos[0].quantidade || 1;
         precoInicial = p.precos[0].preco_venda;
       }
-      html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Quantidade</label>
-          <input type="number" id="modal-qtd" class="form-control" value="${qtdInicial}" min="1" step="1" ${ehDemanda ? 'oninput="aplicarFaixaDemanda()"' : ''}>
+      if (ehM2Faixa) {
+        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
+          <div><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Largura (cm)</label>
+            <input type="number" id="modal-larg" class="form-control" min="0" step="0.1" placeholder="Ex: 80" oninput="calcularM2Faixa()"></div>
+          <div><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Altura (cm)</label>
+            <input type="number" id="modal-alt" class="form-control" min="0" step="0.1" placeholder="Ex: 200" oninput="calcularM2Faixa()"></div>
         </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Preço Unitário (R$)</label>
-          <input type="number" id="modal-preco-unit" class="form-control" value="${precoInicial}" step="0.01" min="0">
+        <div style="font-size:12px;color:#888;margin:8px 0;">Área por peça: <strong id="modal-area">0,00 m²</strong></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px;">
+          <div><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Quantidade (peças)</label>
+            <input type="number" id="modal-qtd" class="form-control" value="1" min="1" step="1" oninput="calcularM2Faixa()"></div>
+          <div><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Preço por m² (R$)</label>
+            <input type="number" id="modal-preco-unit" class="form-control" value="${precoInicial}" step="0.01" min="0" oninput="atualizarSubM2()"></div>
         </div>
-      </div>`;
+        <div style="font-size:12px;color:#888;margin-top:8px;">Total: <strong id="modal-total">0,00 m²</strong> &nbsp;·&nbsp; Subtotal: <strong id="modal-sub-est" style="color:var(--primaria)">R$ 0,00</strong></div>`;
+      } else {
+        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
+          <div>
+            <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Quantidade</label>
+            <input type="number" id="modal-qtd" class="form-control" value="${qtdInicial}" min="1" step="1" ${ehDemanda ? 'oninput="aplicarFaixaDemanda()"' : ''}>
+          </div>
+          <div>
+            <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Preço Unitário (R$)</label>
+            <input type="number" id="modal-preco-unit" class="form-control" value="${precoInicial}" step="0.01" min="0">
+          </div>
+        </div>`;
+      }
       if (p.variacoes && p.variacoes.length > 0) {
         html += `<div style="margin-top:12px;">
           <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Variação</label>
@@ -362,6 +399,7 @@ function abrirModalPreco(id, nome) {
         });
         html += '</select></div>';
       }
+      html += adicionaisHtml();
       document.getElementById('modal-corpo').innerHTML = html;
       lucide.createIcons();
     })
@@ -392,6 +430,48 @@ function calcularMetro() {
   document.getElementById('modal-preco-unit').value = unit.toFixed(2);
 }
 
+// Produto por m² com faixas: L×A (cm) + nº de peças -> área/peça + total m² -> preço da faixa pelo total
+function calcularM2Faixa() {
+  const larg = parseFloat((document.getElementById('modal-larg')||{}).value) || 0;
+  const alt = parseFloat((document.getElementById('modal-alt')||{}).value) || 0;
+  const pecas = parseFloat((document.getElementById('modal-qtd')||{}).value) || 1;
+  const area = (larg / 100) * (alt / 100);
+  const total = area * pecas;
+  const areaEl = document.getElementById('modal-area');
+  if (areaEl) areaEl.textContent = area.toFixed(2).replace('.', ',') + ' m²';
+  const totEl = document.getElementById('modal-total');
+  if (totEl) totEl.textContent = total.toFixed(2).replace('.', ',') + ' m²';
+  // aplica o preço da faixa correspondente ao TOTAL de m²
+  const faixas = produtoSelecionado && produtoSelecionado.faixas;
+  const precoEl = document.getElementById('modal-preco-unit');
+  if (faixas && faixas.length && total > 0 && precoEl) {
+    const faixa = faixas.find(f => {
+      const mn = parseFloat(f.qtd_min) || 1;
+      const mx = f.qtd_max ? parseFloat(f.qtd_max) : Infinity;
+      return total >= mn && total <= mx;
+    });
+    if (faixa) precoEl.value = faixa.preco_venda;
+  }
+  atualizarSubM2();
+}
+
+// Aplica SÓ o preço da faixa escolhida (mantém medida e peças) — override manual
+function selecionarFaixaPreco(preco) {
+  const precoEl = document.getElementById('modal-preco-unit');
+  if (precoEl) precoEl.value = preco;
+  atualizarSubM2();
+}
+
+// Subtotal estimado do item m² = total m² (área×peças) × preço/m²
+function atualizarSubM2() {
+  const larg = parseFloat((document.getElementById('modal-larg')||{}).value) || 0;
+  const alt = parseFloat((document.getElementById('modal-alt')||{}).value) || 0;
+  const pecas = parseFloat((document.getElementById('modal-qtd')||{}).value) || 1;
+  const precoM2 = parseFloat((document.getElementById('modal-preco-unit')||{}).value) || 0;
+  const subEl = document.getElementById('modal-sub-est');
+  if (subEl) subEl.textContent = 'R$ ' + ((larg/100)*(alt/100)*pecas*precoM2).toFixed(2).replace('.', ',');
+}
+
 // Preço por demanda: ao digitar a quantidade, aplica o preço da faixa correspondente
 function aplicarFaixaDemanda() {
   const faixas = produtoSelecionado && produtoSelecionado.faixas;
@@ -410,16 +490,35 @@ document.getElementById('modal-confirmar').addEventListener('click', () => {
   const qtd = parseFloat(document.getElementById('modal-qtd').value) || 1;
   const preco = parseFloat(document.getElementById('modal-preco-unit').value) || 0;
   let desc = produtoSelecionado.nome;
-  if (produtoSelecionado.ehMetro) {
+  let linhaPreco = preco;   // preço unitário da linha
+  let _m2 = qtd;            // m² total p/ acabamentos
+  if (produtoSelecionado.ehM2Faixa) {
     const larg = document.getElementById('modal-larg') ? document.getElementById('modal-larg').value : '';
     const alt = document.getElementById('modal-alt') ? document.getElementById('modal-alt').value : '';
     if (larg && alt) desc += ` (${larg}×${alt}cm)`;
+    const area = (parseFloat(larg)/100) * (parseFloat(alt)/100) || 0;
+    linhaPreco = +(area * preco).toFixed(2);  // preço por peça = área × R$/m²
+    _m2 = area * qtd;                          // total m² (área × peças)
+  } else if (produtoSelecionado.ehMetro) {
+    const larg = document.getElementById('modal-larg') ? document.getElementById('modal-larg').value : '';
+    const alt = document.getElementById('modal-alt') ? document.getElementById('modal-alt').value : '';
+    if (larg && alt) desc += ` (${larg}×${alt}cm)`;
+    _m2 = ((parseFloat(larg)/100) * (parseFloat(alt)/100) * qtd) || qtd;
   } else {
     const varSel = document.getElementById('modal-variacao');
     const varTxt = varSel ? varSel.value : '';
     if (varTxt) desc += ' — ' + varTxt;
   }
-  addLinha(desc, qtd, preco, produtoSelecionado.id);
+  // acabamentos marcados -> dobrados NO MESMO item (adicional do produto, não outro produto)
+  const _acab = document.querySelectorAll('.modal-adicional:checked');
+  if (_acab.length) {
+    let _sumAcab = 0; const _nomes = [];
+    _acab.forEach(cb => { _sumAcab += parseFloat(cb.dataset.preco) || 0; _nomes.push(cb.dataset.nome); });
+    const _acabPorUn = qtd > 0 ? (_m2 * _sumAcab) / qtd : 0;
+    linhaPreco = +(linhaPreco + _acabPorUn).toFixed(2);
+    desc += ' + ' + _nomes.join(' + ');
+  }
+  addLinha(desc, qtd, linhaPreco, produtoSelecionado.id);
   fecharModal();
 });
 

@@ -284,6 +284,25 @@ def init_db():
     except Exception:
         pass
 
+    # Migração: adicionais de venda (acabamentos por m²: bainha+ilhós, meio corte, etc.)
+    try:
+        conn.execute('''CREATE TABLE IF NOT EXISTS adicionais (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            preco REAL DEFAULT 0,
+            ativo INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )''')
+        if conn.execute("SELECT COUNT(*) FROM adicionais").fetchone()[0] == 0:
+            conn.executemany("INSERT INTO adicionais (nome, preco) VALUES (?,?)", [
+                ('Bainha + ilhós', 10.0),
+                ('Bainha reforçada + ilhós', 20.0),
+                ('Meio corte', 10.0),
+            ])
+        conn.commit()
+    except Exception:
+        pass
+
     # Migração: garante tabela prec_acrilicos em bancos já existentes
     try:
         conn.execute('''CREATE TABLE IF NOT EXISTS prec_acrilicos (
@@ -376,6 +395,7 @@ def init_db():
             condicoes TEXT,
             observacoes TEXT,
             pedido_id INTEGER,
+            token_publico TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
 
@@ -773,6 +793,37 @@ def get_fila_producao():
                            ORDER BY p.prazo ASC, p.created_at ASC''').fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+# ─── ADICIONAIS (acabamentos de venda por m²) ────────────────────────────────
+
+def get_adicionais(ativos=True):
+    conn = get_db()
+    q = "SELECT * FROM adicionais"
+    if ativos:
+        q += " WHERE ativo=1"
+    q += " ORDER BY nome"
+    rows = conn.execute(q).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def criar_adicional(nome, preco):
+    conn = get_db()
+    conn.execute("INSERT INTO adicionais (nome, preco) VALUES (?,?)", (nome, float(preco or 0)))
+    conn.commit()
+    conn.close()
+
+def atualizar_adicional(id, nome, preco):
+    conn = get_db()
+    conn.execute("UPDATE adicionais SET nome=?, preco=? WHERE id=?", (nome, float(preco or 0), id))
+    conn.commit()
+    conn.close()
+
+def toggle_adicional(id):
+    conn = get_db()
+    conn.execute("UPDATE adicionais SET ativo = CASE ativo WHEN 1 THEN 0 ELSE 1 END WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+
 
 # ─── FINANCEIRO ──────────────────────────────────────────────────────────────
 
@@ -1560,6 +1611,30 @@ def _proximo_numero_orc():
     row = conn.execute("SELECT COUNT(*) FROM orcamentos WHERE numero LIKE ?", (f'ORC-{ano}-%',)).fetchone()[0]
     conn.close()
     return f'ORC-{ano}-{str(row + 1).zfill(3)}'
+
+def get_orcamento_token(id):
+    """Devolve (criando se preciso) o token do link publico do orcamento."""
+    import secrets
+    conn = get_db()
+    row = conn.execute('SELECT token_publico FROM orcamentos WHERE id=?', (id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    token = row['token_publico']
+    if not token:
+        token = secrets.token_urlsafe(24)
+        conn.execute('UPDATE orcamentos SET token_publico=? WHERE id=?', (token, id))
+        conn.commit()
+    conn.close()
+    return token
+
+
+def get_orcamento_por_token(token):
+    conn = get_db()
+    row = conn.execute('SELECT id FROM orcamentos WHERE token_publico=?', (token,)).fetchone()
+    conn.close()
+    return get_orcamento(row['id']) if row else None
+
 
 def get_orcamentos(status=None, busca=None):
     conn = get_db()

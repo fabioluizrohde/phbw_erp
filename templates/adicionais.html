@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block titulo %}Adicionais{% endblock %}
+{% block topbar_titulo %}Adicionais / Acabamentos{% endblock %}
+
+{% block conteudo %}
+<div style="max-width:760px;">
+
+  <p class="text-muted" style="margin-bottom:18px;font-size:.9rem;">
+    Acabamentos vendidos <strong>por m²</strong> (bainha, ilhós, meio corte…). Aparecem como
+    <strong>checkbox</strong> ao adicionar um item no orçamento ou pedido — o valor é somado
+    automaticamente pela metragem do item.
+  </p>
+
+  <!-- Novo adicional -->
+  <form method="post" action="{{ url_for('novo_adicional') }}"
+        style="display:flex;gap:10px;align-items:flex-end;background:var(--card-bg);border:1px solid var(--borda);border-radius:12px;padding:16px;margin-bottom:22px;">
+    <div style="flex:1;">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Nome do acabamento</label>
+      <input type="text" name="nome" class="form-control" placeholder="Ex: Bainha + ilhós" required>
+    </div>
+    <div style="width:150px;">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Preço por m² (R$)</label>
+      <input type="number" name="preco" class="form-control" min="0" step="0.01" placeholder="0,00" required>
+    </div>
+    <button type="submit" class="btn btn-primario"><i data-lucide="plus"></i> Adicionar</button>
+  </form>
+
+  <!-- Lista -->
+  <div style="background:var(--card-bg);border:1px solid var(--borda);border-radius:12px;overflow:hidden;">
+    <div style="display:flex;padding:12px 16px;background:var(--fundo);font-size:.8rem;font-weight:600;color:#666;">
+      <span style="flex:1;">Acabamento</span>
+      <span style="width:150px;">Preço / m²</span>
+      <span style="width:200px;text-align:right;">Ações</span>
+    </div>
+
+    {% for a in adicionais %}
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid var(--borda);{% if not a.ativo %}opacity:.55;{% endif %}">
+      <form method="post" action="{{ url_for('editar_adicional', id=a.id) }}"
+            style="display:flex;align-items:center;gap:10px;flex:1;">
+        <input type="text" name="nome" value="{{ a.nome }}" class="form-control" style="flex:1;">
+        <input type="number" name="preco" value="{{ '%.2f'|format(a.preco) }}" min="0" step="0.01" class="form-control" style="width:120px;">
+        <button type="submit" class="btn btn-secundario btn-sm"><i data-lucide="save"></i> Salvar</button>
+      </form>
+      <form method="post" action="{{ url_for('toggle_adicional', id=a.id) }}" style="margin:0;">
+        <button type="submit" class="btn btn-ghost btn-sm">
+          {% if a.ativo %}<i data-lucide="eye-off"></i> Desativar{% else %}<i data-lucide="eye"></i> Ativar{% endif %}
+        </button>
+      </form>
+    </div>
+    {% else %}
+    <div style="padding:22px 16px;text-align:center;color:#888;">Nenhum adicional cadastrado ainda.</div>
+    {% endfor %}
+  </div>
+
+</div>
+{% endblock %}

@@ -284,6 +284,25 @@ def init_db():
     except Exception:
         pass
 
+    # Migração: adicionais de venda (acabamentos por m²: bainha+ilhós, meio corte, etc.)
+    try:
+        conn.execute('''CREATE TABLE IF NOT EXISTS adicionais (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            preco REAL DEFAULT 0,
+            ativo INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )''')
+        if conn.execute("SELECT COUNT(*) FROM adicionais").fetchone()[0] == 0:
+            conn.executemany("INSERT INTO adicionais (nome, preco) VALUES (?,?)", [
+                ('Bainha + ilhós', 10.0),
+                ('Bainha reforçada + ilhós', 20.0),
+                ('Meio corte', 10.0),
+            ])
+        conn.commit()
+    except Exception:
+        pass
+
     # Migração: garante tabela prec_acrilicos em bancos já existentes
     try:
         conn.execute('''CREATE TABLE IF NOT EXISTS prec_acrilicos (
@@ -318,6 +337,20 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+
+    # Migração: tipo (pessoal/empresa) + recorrente em contas_pagar
+    for _alter in (
+        "ALTER TABLE contas_pagar ADD COLUMN tipo TEXT DEFAULT 'empresa'",
+        "ALTER TABLE contas_pagar ADD COLUMN recorrente INTEGER DEFAULT 0",
+        "ALTER TABLE contas_pagar ADD COLUMN recorrencia_id INTEGER",
+        "ALTER TABLE contas_pagar ADD COLUMN recorrencia_fim TEXT",
+        "ALTER TABLE contas_pagar ADD COLUMN categoria TEXT DEFAULT 'outros'",
+    ):
+        try:
+            conn.execute(_alter)
+            conn.commit()
+        except Exception:
+            pass
 
     # Migração: Central de Custos — despesas reais datadas
     try:
@@ -376,6 +409,7 @@ def init_db():
             condicoes TEXT,
             observacoes TEXT,
             pedido_id INTEGER,
+            token_publico TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
 
@@ -744,12 +778,35 @@ def atualizar_pedido(id, form, itens):
                 (id, item.get('produto_id') or None, item.get('descricao'),
                  float(item.get('quantidade') or 1), float(item.get('preco_unitario') or 0),
                  float(item.get('subtotal') or 0)))
+    _reconciliar_venda_pedido(conn, id, form.get('status'))
     conn.commit()
     conn.close()
+
+def _reconciliar_venda_pedido(conn, pedido_id, status):
+    """Mantém a entrada de venda no Caixa em sincronia com o status do pedido:
+    cria a entrada quando o pedido fica 'entregue', remove se sair de 'entregue'.
+    Idempotente — nunca duplica (usa lancamentos.pedido_id + categoria='venda')."""
+    row = conn.execute(
+        "SELECT id FROM lancamentos WHERE pedido_id=? AND tipo='entrada' AND categoria='venda'",
+        (pedido_id,)).fetchone()
+    ja_tem = row[0] if row else None
+    if status == 'entregue':
+        if not ja_tem:
+            ped = conn.execute("SELECT total FROM pedidos WHERE id=?", (pedido_id,)).fetchone()
+            valor = ped[0] if ped else 0
+            cx = conn.execute("SELECT id FROM caixas WHERE status='aberto' ORDER BY id DESC LIMIT 1").fetchone()
+            conn.execute(
+                """INSERT INTO lancamentos (caixa_id,tipo,categoria,descricao,valor,pedido_id,data)
+                   VALUES (?,?,?,?,?,?,date('now','localtime'))""",
+                (cx[0] if cx else None, 'entrada', 'venda', f'Venda — Pedido #{pedido_id}', valor, pedido_id))
+    elif ja_tem:
+        conn.execute("DELETE FROM lancamentos WHERE id=?", (ja_tem,))
+
 
 def atualizar_status_pedido(id, status):
     conn = get_db()
     conn.execute("UPDATE pedidos SET status = ? WHERE id = ?", (status, id))
+    _reconciliar_venda_pedido(conn, id, status)
     conn.commit()
     conn.close()
 
@@ -761,6 +818,7 @@ def atualizar_status_producao(id, status):
 
 def excluir_pedido(id):
     conn = get_db()
+    conn.execute("DELETE FROM lancamentos WHERE pedido_id=? AND categoria='venda'", (id,))
     conn.execute("DELETE FROM pedidos WHERE id = ?", (id,))
     conn.commit()
     conn.close()
@@ -773,6 +831,37 @@ def get_fila_producao():
                            ORDER BY p.prazo ASC, p.created_at ASC''').fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+# ─── ADICIONAIS (acabamentos de venda por m²) ────────────────────────────────
+
+def get_adicionais(ativos=True):
+    conn = get_db()
+    q = "SELECT * FROM adicionais"
+    if ativos:
+        q += " WHERE ativo=1"
+    q += " ORDER BY nome"
+    rows = conn.execute(q).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def criar_adicional(nome, preco):
+    conn = get_db()
+    conn.execute("INSERT INTO adicionais (nome, preco) VALUES (?,?)", (nome, float(preco or 0)))
+    conn.commit()
+    conn.close()
+
+def atualizar_adicional(id, nome, preco):
+    conn = get_db()
+    conn.execute("UPDATE adicionais SET nome=?, preco=? WHERE id=?", (nome, float(preco or 0), id))
+    conn.commit()
+    conn.close()
+
+def toggle_adicional(id):
+    conn = get_db()
+    conn.execute("UPDATE adicionais SET ativo = CASE ativo WHEN 1 THEN 0 ELSE 1 END WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+
 
 # ─── FINANCEIRO ──────────────────────────────────────────────────────────────
 
@@ -952,11 +1041,50 @@ PEC_CATEGORIAS = {
     'outros':       'Outros',
 }
 
-def pec_get_custos():
+def pec_get_custos(incluir_recorrentes=False):
+    """Custos fixos do Ponto de Equilíbrio. Se incluir_recorrentes=True, agrega
+    também as contas a pagar marcadas como recorrentes (viram custo fixo mensal,
+    contadas 1x). Essas vêm como linhas virtuais (origem='conta'), somente-leitura."""
     conn = get_db()
     rows = conn.execute("SELECT * FROM pec_custos_fixos WHERE ativo=1 ORDER BY categoria, nome").fetchall()
+    custos = [dict(r) for r in rows]
+    if incluir_recorrentes:
+        try:
+            # 1 linha por SÉRIE (dedupe por recorrencia_id), usando a ocorrência
+            # mais recente = valor mensal atual. Evita somar todos os meses gerados.
+            # Séries já terminadas (recorrencia_fim < mês atual) saem do break-even.
+            import datetime as _dt
+            ym = _dt.date.today().strftime('%Y-%m')
+            rec = conn.execute(
+                "SELECT c.id, c.descricao, c.fornecedor, c.valor, c.tipo "
+                "FROM contas_pagar c "
+                "JOIN (SELECT recorrencia_id, MAX(vencimento) mx FROM contas_pagar "
+                "      WHERE ativo=1 AND recorrente=1 GROUP BY recorrencia_id) t "
+                "ON c.recorrencia_id=t.recorrencia_id AND c.vencimento=t.mx "
+                "WHERE c.ativo=1 AND c.recorrente=1 "
+                "AND (c.recorrencia_fim IS NULL OR c.recorrencia_fim >= ?) "
+                "GROUP BY c.recorrencia_id ORDER BY c.descricao",
+                (ym,)
+            ).fetchall()
+            for c in rec:
+                d = dict(c)
+                obs = ('Conta pessoal' if d.get('tipo') == 'pessoal' else 'Conta da empresa')
+                if d.get('fornecedor'):
+                    obs += f" · {d['fornecedor']}"
+                custos.append({
+                    'id': d['id'],
+                    'nome': d['descricao'],
+                    'categoria': 'recorrente',
+                    'valor': d['valor'] or 0,
+                    'observacao': obs,
+                    'ativo': 1,
+                    'origem': 'conta',
+                    'tipo': d.get('tipo') or 'empresa',
+                })
+        except Exception:
+            pass
     conn.close()
-    return [dict(r) for r in rows]
+    return custos
 
 def pec_salvar_custo(form, id=None):
     conn = get_db()
@@ -1098,6 +1226,92 @@ def get_resumo_despesas(mes, ano):
 
 # ─── CONTAS A PAGAR ──────────────────────────────────────────────────────────
 
+CONTA_CATEGORIAS = {
+    'emprestimo': 'Empréstimo / Financiamento',
+    'custo_fixo': 'Custo Fixo / Operacional',
+    'insumos':    'Insumos / Materiais',
+    'impostos':   'Impostos / Taxas',
+    'salario':    'Salário / Pró-labore',
+    'manutencao': 'Manutenção / Equipamentos',
+    'marketing':  'Marketing / Vendas',
+    'outros':     'Outros',
+}
+
+
+def relatorio_pago_por_categoria(dt_ini, dt_fim, tipo=None, categoria=None):
+    """Relatório financeiro: soma o que foi PAGO (por data de pagamento) no período,
+    agrupado por categoria. Filtros opcionais: tipo (pessoal/empresa) e categoria.
+    Retorna (resumo_por_categoria[], detalhe[])."""
+    conn = get_db()
+    conds = ["ativo=1", "pago_em IS NOT NULL", "date(pago_em) BETWEEN ? AND ?"]
+    params = [dt_ini, dt_fim]
+    if tipo in ('pessoal', 'empresa'):
+        conds.append("tipo=?"); params.append(tipo)
+    if categoria:
+        conds.append("COALESCE(categoria,'outros')=?"); params.append(categoria)
+    where = " AND ".join(conds)
+    resumo = conn.execute(
+        f"SELECT COALESCE(categoria,'outros') AS categoria, COUNT(*) AS qtd, "
+        f"COALESCE(SUM(valor),0) AS total FROM contas_pagar WHERE {where} "
+        f"GROUP BY COALESCE(categoria,'outros') ORDER BY total DESC",
+        params
+    ).fetchall()
+    detalhe = conn.execute(
+        f"SELECT id, descricao, fornecedor, valor, pago_em, "
+        f"COALESCE(categoria,'outros') AS categoria, tipo "
+        f"FROM contas_pagar WHERE {where} ORDER BY pago_em DESC, id DESC",
+        params
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in resumo], [dict(r) for r in detalhe]
+
+
+def garantir_ocorrencias_recorrentes(mes, ano):
+    """Lazy: garante que cada série recorrente ativa tenha UMA ocorrência no mês/ano
+    pedido. O valor é herdado da ocorrência mais recente da série (<= mês alvo),
+    dando o comportamento 'dali pra frente'. Chamado ao abrir o Contas a Pagar."""
+    import calendar
+    conn = get_db()
+    alvo = f"{int(ano):04d}-{int(mes):02d}"
+    series = conn.execute(
+        "SELECT * FROM contas_pagar WHERE ativo=1 AND recorrente=1 AND recorrencia_id=id"
+    ).fetchall()
+    for row in series:
+        s = dict(row)
+        inicio = (s['vencimento'] or '')[:7]
+        if not inicio or alvo <= inicio:
+            continue  # mês alvo é o de início (âncora já cobre) ou anterior à série
+        fim = s.get('recorrencia_fim')
+        if fim and alvo > fim:
+            continue  # série já terminou nesse mês
+        existe = conn.execute(
+            "SELECT 1 FROM contas_pagar WHERE recorrencia_id=? AND ativo=1 AND substr(vencimento,1,7)=?",
+            (s['recorrencia_id'], alvo)
+        ).fetchone()
+        if existe:
+            continue
+        try:
+            dia = int((s['vencimento'] or '2000-01-01')[8:10] or 1)
+        except ValueError:
+            dia = 1
+        ult = calendar.monthrange(int(ano), int(mes))[1]
+        nova_venc = f"{alvo}-{min(dia, ult):02d}"
+        base = conn.execute(
+            "SELECT valor FROM contas_pagar WHERE recorrencia_id=? AND ativo=1 AND vencimento<=? "
+            "ORDER BY vencimento DESC LIMIT 1",
+            (s['recorrencia_id'], nova_venc)
+        ).fetchone()
+        valor = base['valor'] if base else s['valor']
+        conn.execute(
+            "INSERT INTO contas_pagar (descricao,fornecedor,valor,vencimento,forma_pagamento,observacao,tipo,recorrente,recorrencia_id) "
+            "VALUES (?,?,?,?,?,?,?,1,?)",
+            (s['descricao'], s['fornecedor'], valor, nova_venc, s['forma_pagamento'],
+             s['observacao'], s['tipo'], s['recorrencia_id'])
+        )
+    conn.commit()
+    conn.close()
+
+
 def get_contas_pagar(status_filtro=None, mes=None, ano=None):
     import datetime
     conn = get_db()
@@ -1136,24 +1350,67 @@ def get_contas_pagar(status_filtro=None, mes=None, ano=None):
 
 def salvar_conta_pagar(form, id=None):
     conn = get_db()
+    tipo = form.get('tipo', 'empresa')
+    if tipo not in ('pessoal', 'empresa'):
+        tipo = 'empresa'
+    recorrente = 1 if form.get('recorrente') in ('1', 'on', 'true', 'sim', True) else 0
+    valor = float(form.get('valor') or 0)
+    vencimento = form.get('vencimento', '')
+    # término da recorrência: 'YYYY-MM' (último mês) ou None = nunca termina
+    rec_fim = None
+    if recorrente and form.get('recorrencia_tipo') == 'com_fim':
+        f = (form.get('recorrencia_fim') or '').strip()
+        rec_fim = f if f else None
+    categoria = form.get('categoria', 'outros')
+    if categoria not in CONTA_CATEGORIAS:
+        categoria = 'outros'
     campos = (
         form.get('descricao', '').strip(),
         form.get('fornecedor', '').strip(),
-        float(form.get('valor') or 0),
-        form.get('vencimento', ''),
+        valor,
+        vencimento,
         form.get('forma_pagamento', 'boleto'),
         form.get('observacao', '').strip(),
+        tipo,
+        recorrente,
+        rec_fim,
+        categoria,
     )
     if id:
+        atual = conn.execute("SELECT recorrencia_id FROM contas_pagar WHERE id=?", (id,)).fetchone()
         conn.execute(
-            "UPDATE contas_pagar SET descricao=?,fornecedor=?,valor=?,vencimento=?,forma_pagamento=?,observacao=? WHERE id=?",
+            "UPDATE contas_pagar SET descricao=?,fornecedor=?,valor=?,vencimento=?,forma_pagamento=?,observacao=?,tipo=?,recorrente=?,recorrencia_fim=?,categoria=? WHERE id=?",
             campos + (id,)
         )
+        rec_id = atual['recorrencia_id'] if atual else None
+        if recorrente:
+            if not rec_id:
+                rec_id = id
+                conn.execute("UPDATE contas_pagar SET recorrencia_id=? WHERE id=?", (rec_id, id))
+            # "dali pra frente": o novo valor vale para os meses SEGUINTES já gerados
+            conn.execute(
+                "UPDATE contas_pagar SET valor=? WHERE recorrencia_id=? AND ativo=1 AND vencimento > ?",
+                (valor, rec_id, vencimento)
+            )
+            # término vale para a série INTEIRA
+            conn.execute(
+                "UPDATE contas_pagar SET recorrencia_fim=? WHERE recorrencia_id=? AND ativo=1",
+                (rec_fim, rec_id)
+            )
+            # se há término, apaga ocorrências futuras (não pagas) além dele
+            if rec_fim:
+                conn.execute(
+                    "DELETE FROM contas_pagar WHERE recorrencia_id=? AND substr(vencimento,1,7) > ? AND pago_em IS NULL",
+                    (rec_id, rec_fim)
+                )
     else:
-        conn.execute(
-            "INSERT INTO contas_pagar (descricao,fornecedor,valor,vencimento,forma_pagamento,observacao) VALUES (?,?,?,?,?,?)",
+        cur = conn.execute(
+            "INSERT INTO contas_pagar (descricao,fornecedor,valor,vencimento,forma_pagamento,observacao,tipo,recorrente,recorrencia_fim,categoria) VALUES (?,?,?,?,?,?,?,?,?,?)",
             campos
         )
+        if recorrente:
+            new_id = cur.lastrowid
+            conn.execute("UPDATE contas_pagar SET recorrencia_id=? WHERE id=?", (new_id, new_id))
     conn.commit()
     conn.close()
 
@@ -1561,6 +1818,30 @@ def _proximo_numero_orc():
     conn.close()
     return f'ORC-{ano}-{str(row + 1).zfill(3)}'
 
+def get_orcamento_token(id):
+    """Devolve (criando se preciso) o token do link publico do orcamento."""
+    import secrets
+    conn = get_db()
+    row = conn.execute('SELECT token_publico FROM orcamentos WHERE id=?', (id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    token = row['token_publico']
+    if not token:
+        token = secrets.token_urlsafe(24)
+        conn.execute('UPDATE orcamentos SET token_publico=? WHERE id=?', (token, id))
+        conn.commit()
+    conn.close()
+    return token
+
+
+def get_orcamento_por_token(token):
+    conn = get_db()
+    row = conn.execute('SELECT id FROM orcamentos WHERE token_publico=?', (token,)).fetchone()
+    conn.close()
+    return get_orcamento(row['id']) if row else None
+
+
 def get_orcamentos(status=None, busca=None):
     conn = get_db()
     sql = '''SELECT o.*, c.nome as cliente_nome FROM orcamentos o
@@ -1832,7 +2113,39 @@ def _nfe_parse_papel_nome(nome):
     return limpo, larg, alt, folhas
 
 
-def nfe_criar_insumo(tipo, nome, custo):
+def _nfe_area_rolo_m2(descricao):
+    """Extrai a área do rolo (largura × comprimento, em m²) da descrição da NF-e.
+    Reconhece padrões como '1,06 x 50m', '3,20 X 50 m', '106 x 50'. Retorna 0 se não achar.
+    Largura >= 10 é interpretada como cm (ex.: 106, 320) e convertida para metros."""
+    import re
+    if not descricao:
+        return 0.0
+    m = re.search(r'(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)\s*m?', descricao)
+    if not m:
+        return 0.0
+    larg = float(m.group(1).replace(',', '.'))
+    comp = float(m.group(2).replace(',', '.'))
+    if larg >= 10:            # veio em cm -> converte para metros
+        larg = larg / 100.0
+    area = larg * comp
+    return area if area > 0 else 0.0
+
+
+def _nfe_custo_m2(valor_unit, unidade, descricao):
+    """Converte o valor unitário da NF-e em custo por m² de mídia em bobina.
+    - Unidade já em m² (m2/m²): usa o valor direto.
+    - Por rolo/peça: divide pelo tamanho do rolo extraído da descrição.
+    - Sem dimensões reconhecíveis: mantém o valor unitário (fallback)."""
+    u = (unidade or '').strip().lower().replace('²', '2')
+    if u in ('m2', 'mt2', 'm'):
+        return valor_unit
+    area = _nfe_area_rolo_m2(descricao)
+    if area > 0:
+        return round(valor_unit / area, 4)
+    return valor_unit
+
+
+def nfe_criar_insumo(tipo, nome, custo, unidade=None, descricao=None):
     conn = get_db()
     c = conn.cursor()
     if tipo == 'papel':
@@ -1846,7 +2159,9 @@ def nfe_criar_insumo(tipo, nome, custo):
     elif tipo == 'papelao':
         c.execute("INSERT INTO prec_papelao (nome, custo) VALUES (?,?)", (nome, custo))
     elif tipo == 'midia':
-        c.execute("INSERT INTO prec_midias_bobina (nome, custo_m2) VALUES (?,?)", (nome, custo))
+        # NF-e cobra por rolo; converte para custo por m² usando o tamanho do rolo
+        custo_m2 = _nfe_custo_m2(custo, unidade, descricao or nome)
+        c.execute("INSERT INTO prec_midias_bobina (nome, custo_m2) VALUES (?,?)", (nome, custo_m2))
     else:
         conn.close()
         return None
@@ -1880,6 +2195,10 @@ def nfe_importar(header, itens_mapeados):
             fr = c.execute("SELECT folhas_resma FROM prec_papeis WHERE id=?", (iid,)).fetchone()
             folhas = (fr[0] if fr and fr[0] else 1)
             c.execute("UPDATE prec_papeis SET custo_resma=? WHERE id=?", (item['valor_unit'] * folhas, iid))
+        elif tipo == 'midia':
+            # NF-e cobra por rolo; converte para custo por m² usando o tamanho do rolo
+            custo_m2 = _nfe_custo_m2(item['valor_unit'], item.get('unidade'), item.get('descricao'))
+            c.execute("UPDATE prec_midias_bobina SET custo_m2=? WHERE id=?", (custo_m2, iid))
         elif tipo in _CUSTO_FIELDS:
             table, field = _CUSTO_FIELDS[tipo]
             c.execute(f"UPDATE {table} SET {field}=? WHERE id=?", (item['valor_unit'], iid))

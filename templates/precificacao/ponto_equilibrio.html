@@ -72,6 +72,7 @@
           'financeiro':  ('💳 Financeiro', '#EF4444'),
           'marketing':   ('📣 Marketing', '#EC4899'),
           'outros':      ('📋 Outros', '#6B7280'),
+          'recorrente':  ('🔁 Contas Recorrentes', '#0EA5E9'),
         } %}
         {% for cat_id, (cat_label, cat_cor) in cats.items() %}
           {% set itens = custos | selectattr('categoria', 'equalto', cat_id) | list %}
@@ -90,7 +91,12 @@
             </div>
             <div class="pec-item-valor">R$ {{ "%.2f"|format(c.valor) }}</div>
             <div class="pec-item-acoes">
-              <button class="btn btn-ghost btn-sm" onclick="editarCusto({{ c|tojson }})">
+              {% if c.origem == 'conta' %}
+              <a href="{{ url_for('contas_pagar') }}" class="btn btn-ghost btn-sm"
+                 style="text-decoration:none;font-size:.72rem;color:var(--texto-muted);"
+                 title="Conta recorrente — editar em Contas a Pagar">🔁 em Contas a Pagar</a>
+              {% else %}
+              <button class="btn btn-ghost btn-sm" onclick='editarCusto({{ c|tojson }})'>
                 <i data-lucide="pencil"></i>
               </button>
               <form method="POST" action="{{ url_for('pec_excluir_custo', id=c.id) }}" style="display:inline;"
@@ -99,6 +105,7 @@
                   <i data-lucide="trash-2"></i>
                 </button>
               </form>
+              {% endif %}
             </div>
           </div>
           {% endfor %}

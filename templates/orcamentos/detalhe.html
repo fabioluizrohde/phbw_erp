@@ -2,8 +2,11 @@
 {% block titulo %}Orçamento {{ orcamento.numero }}{% endblock %}
 {% block topbar_titulo %}{{ orcamento.numero }}{% endblock %}
 {% block topbar_acoes %}
-  <button type="button" onclick="enviarWhatsApp()" class="btn" style="background:#25D366;color:#fff;border:none;">
+  <button type="button" onclick="enviarWhatsApp(this)" class="btn" style="background:#25D366;color:#fff;border:none;">
     <i data-lucide="send"></i> Enviar pro cliente
+  </button>
+  <button type="button" onclick="copiarImagemOrcamento(this)" class="btn btn-secundario">
+    <i data-lucide="clipboard"></i> Copiar imagem
   </button>
   <a href="{{ url_for('imprimir_orcamento', id=orcamento.id) }}" target="_blank" class="btn btn-secundario">
     <i data-lucide="download"></i> Baixar PDF
@@ -129,21 +132,52 @@
 </div>
 
 <script>
-function enviarWhatsApp() {
-  const tel = "{{ orcamento.cliente_telefone or '' }}".replace(/\D/g, '');
-  if (!tel) { alert('Este cliente não tem telefone cadastrado. Edite o cliente para adicionar o número.'); return; }
-  const fone = tel.length <= 11 ? '55' + tel : tel;
-  const itens = {{ orcamento.itens|tojson }};
-  let msg = "Olá {{ (orcamento.cliente_nome or 'cliente')|replace('\"','') }}! 👋\n\n";
-  msg += "Segue o seu orçamento {{ orcamento.numero }} da {{ empresa_nome }}:\n\n";
-  itens.forEach(i => {
-    const q = Number(i.quantidade) % 1 === 0 ? parseInt(i.quantidade) : i.quantidade;
-    msg += `• ${q}x ${i.descricao || i.produto_nome || 'Item'} — R$ ${Number(i.subtotal||0).toFixed(2)}\n`;
-  });
-  msg += `\nTotal: R$ {{ "%.2f"|format(orcamento.total) }}`;
-  {% if orcamento.validade %}msg += `\nVálido até: {{ orcamento.validade }}`;{% endif %}
-  msg += `\n\nQualquer dúvida, estou à disposição!`;
-  window.open(`https://wa.me/${fone}?text=${encodeURIComponent(msg)}`, '_blank');
+async function enviarWhatsApp(btn){
+  const tel  = "{{ orcamento.cliente_telefone or '' }}".replace(/\D/g,'');
+  const fone = tel ? (tel.length <= 11 ? '55' + tel : tel) : '';
+  const nome = "orcamento-{{ orcamento.numero }}.pdf";
+  const msg  = "Olá {{ (orcamento.cliente_nome or 'cliente')|replace('\"','') }}! 👋\n\nSegue o seu orçamento {{ orcamento.numero }} da {{ empresa_nome }}.";
+  const antes = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Preparando PDF…'; }
+  try{
+    const r = await fetch("{{ url_for('pdf_orcamento', id=orcamento.id) }}");
+    if(!r.ok) throw new Error('não consegui gerar o PDF');
+    const blob = await r.blob();
+    const arq  = new File([blob], nome, {type:'application/pdf'});
+
+    if(navigator.canShare && navigator.canShare({files:[arq]})){
+      await navigator.share({files:[arq], text: msg});
+    }else{
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = nome; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url), 30000);
+      alert('Seu navegador não deixa anexar direto.\n\nO PDF foi baixado. Vou abrir a conversa no WhatsApp — é só arrastar o arquivo pra lá.');
+      if(fone) window.open('https://wa.me/' + fone + '?text=' + encodeURIComponent(msg), '_blank');
+    }
+  }catch(e){
+    if(e && e.name === 'AbortError'){ /* usuario cancelou */ }
+    else alert('Erro: ' + e.message);
+  }
+  if(btn){ btn.disabled = false; btn.textContent = antes; }
+}
+
+async function copiarImagemOrcamento(btn){
+  const antes = btn.textContent; btn.disabled = true; btn.textContent = 'Preparando…';
+  try{
+    const r = await fetch("{{ url_for('imagem_orcamento', id=orcamento.id) }}");
+    if(!r.ok) throw new Error('não consegui gerar a imagem');
+    const total = parseInt(r.headers.get('X-Total-Paginas') || '1');
+    const blob = await r.blob();
+    await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+    btn.textContent = '✅ Copiado!';
+    if(total > 1) alert('Copiei a página 1 de ' + total + '.\n\nA área de transferência só guarda uma imagem por vez. Para as outras, use o botão de enviar o PDF.');
+    setTimeout(()=>{ btn.textContent = antes; btn.disabled = false; }, 2000);
+    return;
+  }catch(e){
+    alert('Não consegui copiar: ' + e.message + '\n\nSe o navegador bloqueou, clique na página antes de tentar de novo.');
+  }
+  btn.disabled = false; btn.textContent = antes;
 }
 </script>
 {% endblock %}

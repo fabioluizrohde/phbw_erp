@@ -1,0 +1,121 @@
+{% extends 'base.html' %}
+{% block titulo %}Relatórios Financeiros{% endblock %}
+{% block topbar_titulo %}Relatórios Financeiros{% endblock %}
+{% block topbar_acoes %}
+  <a href="{{ url_for('contas_pagar') }}" class="btn btn-outline">
+    <i data-lucide="file-check-2"></i> Contas a Pagar
+  </a>
+{% endblock %}
+
+{% block conteudo %}
+<style>
+  .rel-filtros { background:var(--card-bg); border:1px solid var(--borda); border-radius:14px; padding:16px 18px; margin-bottom:20px; }
+  .rel-filtros form { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; }
+  .rel-fg { display:flex; flex-direction:column; gap:5px; }
+  .rel-fg label { font-size:.75rem; color:var(--texto-muted); font-weight:600; }
+  .rel-fg input, .rel-fg select { padding:7px 10px; border:1px solid var(--borda); border-radius:8px; background:var(--fundo); color:var(--texto); }
+  .rel-total { display:flex; justify-content:space-between; align-items:center; background:rgba(233,69,96,.06); border:1.5px solid var(--primaria); border-radius:12px; padding:16px 20px; margin-bottom:20px; }
+  .rel-cats { display:grid; gap:12px; margin-bottom:24px; }
+  .rel-cat { background:var(--card-bg); border:1px solid var(--borda); border-radius:12px; padding:14px 16px; }
+  .rel-cat-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:10px; }
+  .rel-cat-nome { font-weight:700; }
+  .rel-cat-val { font-family:monospace; font-weight:800; font-size:1.05rem; white-space:nowrap; }
+  .rel-bar { height:8px; border-radius:6px; background:rgba(128,128,128,.15); overflow:hidden; }
+  .rel-bar > div { height:100%; background:var(--primaria); }
+  table.rel-det { width:100%; border-collapse:collapse; font-size:.85rem; }
+  table.rel-det th, table.rel-det td { padding:8px 12px; text-align:left; border-bottom:1px solid var(--borda); }
+  table.rel-det th { color:var(--texto-muted); font-size:.75rem; text-transform:uppercase; }
+</style>
+
+<!-- FILTROS -->
+<div class="rel-filtros">
+  <form method="GET" action="{{ url_for('relatorios_financeiros') }}">
+    <div class="rel-fg">
+      <label>Filtrar por</label>
+      <select name="modo" onchange="this.form.submit()">
+        <option value="mes" {% if modo=='mes' %}selected{% endif %}>Por mês</option>
+        <option value="intervalo" {% if modo=='intervalo' %}selected{% endif %}>Por intervalo</option>
+      </select>
+    </div>
+    {% if modo == 'intervalo' %}
+    <div class="rel-fg"><label>De</label><input type="date" name="de" value="{{ de }}"></div>
+    <div class="rel-fg"><label>Até</label><input type="date" name="ate" value="{{ ate }}"></div>
+    {% else %}
+    <div class="rel-fg">
+      <label>Mês</label>
+      <select name="mes">
+        {% for m in range(1,13) %}<option value="{{ m }}" {% if m==mes %}selected{% endif %}>{{ '%02d'|format(m) }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="rel-fg"><label>Ano</label><input type="number" name="ano" value="{{ ano }}" style="width:90px;"></div>
+    {% endif %}
+    <div class="rel-fg">
+      <label>Categoria</label>
+      <select name="categoria">
+        <option value="">Todas</option>
+        {% for k, v in categorias.items() %}<option value="{{ k }}" {% if categoria==k %}selected{% endif %}>{{ v }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="rel-fg">
+      <label>Tipo</label>
+      <select name="tipo">
+        <option value="">Todos</option>
+        <option value="empresa" {% if tipo=='empresa' %}selected{% endif %}>🏢 Empresa</option>
+        <option value="pessoal" {% if tipo=='pessoal' %}selected{% endif %}>👤 Pessoal</option>
+      </select>
+    </div>
+    <div class="rel-fg"><label>&nbsp;</label><button type="submit" class="btn btn-primario">Filtrar</button></div>
+  </form>
+</div>
+
+<!-- TOTAL -->
+<div class="rel-total">
+  <div>
+    <div style="font-size:.8rem;color:var(--texto-muted);">Total pago no período ({{ de[8:10] }}/{{ de[5:7] }}/{{ de[:4] }} a {{ ate[8:10] }}/{{ ate[5:7] }}/{{ ate[:4] }})</div>
+    <div style="font-size:1.6rem;font-weight:800;color:var(--primaria);font-family:monospace;">R$ {{ "%.2f"|format(total) }}</div>
+  </div>
+  <i data-lucide="bar-chart-3" style="width:36px;height:36px;color:var(--primaria);opacity:.5;"></i>
+</div>
+
+{% if resumo %}
+<!-- POR CATEGORIA -->
+<div class="rel-cats">
+  {% for r in resumo %}
+  <div class="rel-cat">
+    <div class="rel-cat-top">
+      <span class="rel-cat-nome">{{ categorias.get(r.categoria, r.categoria) }}
+        <small style="color:var(--texto-muted);font-weight:400;">({{ r.qtd }} conta{{ 's' if r.qtd != 1 else '' }})</small></span>
+      <span class="rel-cat-val">R$ {{ "%.2f"|format(r.total) }}</span>
+    </div>
+    <div class="rel-bar"><div style="width:{{ (r.total / total * 100) if total else 0 }}%;"></div></div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- DETALHE -->
+<div class="card" style="padding:0;overflow:hidden;">
+  <div style="padding:12px 16px;font-weight:700;border-bottom:1px solid var(--borda);">Detalhamento — {{ detalhe|length }} pagamento{{ 's' if detalhe|length != 1 else '' }}</div>
+  <div style="overflow-x:auto;">
+    <table class="rel-det">
+      <thead><tr><th>Pago em</th><th>Descrição</th><th>Categoria</th><th>Tipo</th><th style="text-align:right;">Valor</th></tr></thead>
+      <tbody>
+      {% for d in detalhe %}
+        <tr>
+          <td style="white-space:nowrap;">{{ d.pago_em[8:10] }}/{{ d.pago_em[5:7] }}/{{ d.pago_em[:4] }}</td>
+          <td>{{ d.descricao }}{% if d.fornecedor %}<br><small style="color:var(--texto-muted);">{{ d.fornecedor }}</small>{% endif %}</td>
+          <td>{{ categorias.get(d.categoria, d.categoria) }}</td>
+          <td style="white-space:nowrap;">{{ '👤 Pessoal' if d.tipo=='pessoal' else '🏢 Empresa' }}</td>
+          <td style="text-align:right;font-family:monospace;white-space:nowrap;">R$ {{ "%.2f"|format(d.valor) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div style="text-align:center;padding:50px 20px;color:var(--texto-muted);">
+  <i data-lucide="receipt" style="width:40px;height:40px;opacity:.4;"></i>
+  <p style="margin-top:12px;">Nenhum pagamento registrado nesse período/filtro.</p>
+</div>
+{% endif %}
+{% endblock %}

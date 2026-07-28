@@ -1979,9 +1979,14 @@ function calcMetrosPorFolha(bobinaLarg, sheetL, sheetA) {
 
 function getCustoClickEfetivo() {
   if (!st.maquina) return 0;
-  const pb  = st.maquina.custo_click_pb  || 0;
-  const cor = st.maquina.custo_click_cor || 0;
-  if (!pb && !cor) return st.maquina.custo_click;
+  const base = st.maquina.custo_click || 0;
+  let pb  = st.maquina.custo_click_pb  || 0;
+  let cor = st.maquina.custo_click_cor || 0;
+  if (!pb && !cor) return base;
+  // Se só um dos custos (PB ou cor) foi configurado, usa o custo base do click no que faltar.
+  // Evita que uma impressão colorida saia R$ 0,00 quando só o PB está preenchido (e vice-versa).
+  if (!pb)  pb  = base;
+  if (!cor) cor = base;
   const pctCor = ((st.pctCor !== undefined ? st.pctCor : 100)) / 100;
   return pb * (1 - pctCor) + cor * pctCor;
 }

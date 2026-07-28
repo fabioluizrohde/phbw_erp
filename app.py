@@ -1039,7 +1039,7 @@ def nfe_confirmar():
         valor_unit = float(form.get(f'valor_unit_{i}', 0) or 0)
         if acao == 'criar_novo':
             nome_novo  = (form.get(f'novo_nome_{i}', '') or descricao).strip()
-            insumo_id  = db.nfe_criar_insumo(tipo, nome_novo, valor_unit)
+            insumo_id  = db.nfe_criar_insumo(tipo, nome_novo, valor_unit, unidade, descricao)
         else:
             insumo_id = int(form.get(f'insumo_id_{i}', 0) or 0)
         if not tipo or not insumo_id:

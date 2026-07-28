@@ -778,12 +778,35 @@ def atualizar_pedido(id, form, itens):
                 (id, item.get('produto_id') or None, item.get('descricao'),
                  float(item.get('quantidade') or 1), float(item.get('preco_unitario') or 0),
                  float(item.get('subtotal') or 0)))
+    _reconciliar_venda_pedido(conn, id, form.get('status'))
     conn.commit()
     conn.close()
+
+def _reconciliar_venda_pedido(conn, pedido_id, status):
+    """Mantém a entrada de venda no Caixa em sincronia com o status do pedido:
+    cria a entrada quando o pedido fica 'entregue', remove se sair de 'entregue'.
+    Idempotente — nunca duplica (usa lancamentos.pedido_id + categoria='venda')."""
+    row = conn.execute(
+        "SELECT id FROM lancamentos WHERE pedido_id=? AND tipo='entrada' AND categoria='venda'",
+        (pedido_id,)).fetchone()
+    ja_tem = row[0] if row else None
+    if status == 'entregue':
+        if not ja_tem:
+            ped = conn.execute("SELECT total FROM pedidos WHERE id=?", (pedido_id,)).fetchone()
+            valor = ped[0] if ped else 0
+            cx = conn.execute("SELECT id FROM caixas WHERE status='aberto' ORDER BY id DESC LIMIT 1").fetchone()
+            conn.execute(
+                """INSERT INTO lancamentos (caixa_id,tipo,categoria,descricao,valor,pedido_id,data)
+                   VALUES (?,?,?,?,?,?,date('now','localtime'))""",
+                (cx[0] if cx else None, 'entrada', 'venda', f'Venda — Pedido #{pedido_id}', valor, pedido_id))
+    elif ja_tem:
+        conn.execute("DELETE FROM lancamentos WHERE id=?", (ja_tem,))
+
 
 def atualizar_status_pedido(id, status):
     conn = get_db()
     conn.execute("UPDATE pedidos SET status = ? WHERE id = ?", (status, id))
+    _reconciliar_venda_pedido(conn, id, status)
     conn.commit()
     conn.close()
 
@@ -795,6 +818,7 @@ def atualizar_status_producao(id, status):
 
 def excluir_pedido(id):
     conn = get_db()
+    conn.execute("DELETE FROM lancamentos WHERE pedido_id=? AND categoria='venda'", (id,))
     conn.execute("DELETE FROM pedidos WHERE id = ?", (id,))
     conn.commit()
     conn.close()
@@ -2089,7 +2113,39 @@ def _nfe_parse_papel_nome(nome):
     return limpo, larg, alt, folhas
 
 
-def nfe_criar_insumo(tipo, nome, custo):
+def _nfe_area_rolo_m2(descricao):
+    """Extrai a área do rolo (largura × comprimento, em m²) da descrição da NF-e.
+    Reconhece padrões como '1,06 x 50m', '3,20 X 50 m', '106 x 50'. Retorna 0 se não achar.
+    Largura >= 10 é interpretada como cm (ex.: 106, 320) e convertida para metros."""
+    import re
+    if not descricao:
+        return 0.0
+    m = re.search(r'(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)\s*m?', descricao)
+    if not m:
+        return 0.0
+    larg = float(m.group(1).replace(',', '.'))
+    comp = float(m.group(2).replace(',', '.'))
+    if larg >= 10:            # veio em cm -> converte para metros
+        larg = larg / 100.0
+    area = larg * comp
+    return area if area > 0 else 0.0
+
+
+def _nfe_custo_m2(valor_unit, unidade, descricao):
+    """Converte o valor unitário da NF-e em custo por m² de mídia em bobina.
+    - Unidade já em m² (m2/m²): usa o valor direto.
+    - Por rolo/peça: divide pelo tamanho do rolo extraído da descrição.
+    - Sem dimensões reconhecíveis: mantém o valor unitário (fallback)."""
+    u = (unidade or '').strip().lower().replace('²', '2')
+    if u in ('m2', 'mt2', 'm'):
+        return valor_unit
+    area = _nfe_area_rolo_m2(descricao)
+    if area > 0:
+        return round(valor_unit / area, 4)
+    return valor_unit
+
+
+def nfe_criar_insumo(tipo, nome, custo, unidade=None, descricao=None):
     conn = get_db()
     c = conn.cursor()
     if tipo == 'papel':
@@ -2103,7 +2159,9 @@ def nfe_criar_insumo(tipo, nome, custo):
     elif tipo == 'papelao':
         c.execute("INSERT INTO prec_papelao (nome, custo) VALUES (?,?)", (nome, custo))
     elif tipo == 'midia':
-        c.execute("INSERT INTO prec_midias_bobina (nome, custo_m2) VALUES (?,?)", (nome, custo))
+        # NF-e cobra por rolo; converte para custo por m² usando o tamanho do rolo
+        custo_m2 = _nfe_custo_m2(custo, unidade, descricao or nome)
+        c.execute("INSERT INTO prec_midias_bobina (nome, custo_m2) VALUES (?,?)", (nome, custo_m2))
     else:
         conn.close()
         return None
@@ -2137,6 +2195,10 @@ def nfe_importar(header, itens_mapeados):
             fr = c.execute("SELECT folhas_resma FROM prec_papeis WHERE id=?", (iid,)).fetchone()
             folhas = (fr[0] if fr and fr[0] else 1)
             c.execute("UPDATE prec_papeis SET custo_resma=? WHERE id=?", (item['valor_unit'] * folhas, iid))
+        elif tipo == 'midia':
+            # NF-e cobra por rolo; converte para custo por m² usando o tamanho do rolo
+            custo_m2 = _nfe_custo_m2(item['valor_unit'], item.get('unidade'), item.get('descricao'))
+            c.execute("UPDATE prec_midias_bobina SET custo_m2=? WHERE id=?", (custo_m2, iid))
         elif tipo in _CUSTO_FIELDS:
             table, field = _CUSTO_FIELDS[tipo]
             c.execute(f"UPDATE {table} SET {field}=? WHERE id=?", (item['valor_unit'], iid))

@@ -146,7 +146,7 @@
                 - R$ {{ "%.2f"|format(d.valor) }}
               </td>
               <td style="white-space:nowrap">
-                <button class="btn btn-sm btn-outline" onclick="editarDespesa({{ d|tojson }})">
+                <button class="btn btn-sm btn-outline" onclick='editarDespesa({{ d|tojson }})'>
                   <i data-lucide="pencil" style="width:13px;height:13px"></i>
                 </button>
                 <form method="POST" action="{{ url_for('excluir_despesa', id=d.id) }}" style="display:inline" onsubmit="return confirm('Remover esta despesa?')">
@@ -233,7 +233,7 @@
             </div>
             <div class="fixo-valor">R$ {{ "%.2f"|format(c.valor) }}/mês</div>
             <div class="fixo-acoes">
-              <button class="btn btn-sm btn-outline" onclick="editarFixo({{ c|tojson }})">
+              <button class="btn btn-sm btn-outline" onclick='editarFixo({{ c|tojson }})'>
                 <i data-lucide="pencil" style="width:13px;height:13px"></i>
               </button>
               <form method="POST" action="{{ url_for('pec_excluir_custo', id=c.id) }}" style="display:inline" onsubmit="return confirm('Remover custo fixo?')">

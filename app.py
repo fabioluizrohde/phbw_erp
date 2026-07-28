@@ -212,7 +212,7 @@ def admin_backup_download():
 def home():
     stats = db.get_stats()
     # dados ponto de equilíbrio para widget do dashboard
-    pec_custos       = db.pec_get_custos()
+    pec_custos       = db.pec_get_custos(incluir_recorrentes=True)
     pec_total        = sum(c['valor'] for c in pec_custos if c['ativo'])
     overhead_pct     = float(db.prec_get_config('overhead_pct', 0))
     invest_venda_pct = float(db.prec_get_config('invest_venda_pct', 0))
@@ -957,7 +957,7 @@ def prec_ficha_salvo(id):
 
 @app.route('/precificacao/ponto-equilibrio')
 def pec_index():
-    custos = db.pec_get_custos()
+    custos = db.pec_get_custos(incluir_recorrentes=True)
     total  = sum(c['valor'] for c in custos)
     overhead_pct    = float(db.prec_get_config('overhead_pct', 0))
     invest_venda_pct = float(db.prec_get_config('invest_venda_pct', 0))
@@ -1187,6 +1187,7 @@ def contas_pagar():
     mes    = int(request.args.get('mes', hoje.month))
     ano    = int(request.args.get('ano', hoje.year))
     status = request.args.get('status', '')
+    db.garantir_ocorrencias_recorrentes(mes, ano)  # cria a ocorrência do mês p/ séries recorrentes
     contas       = db.get_contas_pagar(status or None, mes, ano)
     resumo       = db.get_resumo_contas(mes, ano)
     fornecedores = db.get_fornecedores()
@@ -1196,7 +1197,34 @@ def contas_pagar():
         formas=db.FORMAS_PAGAMENTO,
         hoje=hoje.isoformat(),
         fornecedores=fornecedores,
+        categorias=db.CONTA_CATEGORIAS,
     )
+
+@app.route('/financeiro/relatorios')
+def relatorios_financeiros():
+    from datetime import date
+    import calendar
+    hoje = date.today()
+    modo = request.args.get('modo', 'mes')
+    tipo = request.args.get('tipo', '')
+    categoria = request.args.get('categoria', '')
+    if modo == 'intervalo':
+        de  = request.args.get('de')  or hoje.replace(day=1).isoformat()
+        ate = request.args.get('ate') or hoje.isoformat()
+        mes, ano = hoje.month, hoje.year
+    else:
+        mes = int(request.args.get('mes', hoje.month))
+        ano = int(request.args.get('ano', hoje.year))
+        ult = calendar.monthrange(ano, mes)[1]
+        de  = f"{ano:04d}-{mes:02d}-01"
+        ate = f"{ano:04d}-{mes:02d}-{ult:02d}"
+    resumo, detalhe = db.relatorio_pago_por_categoria(de, ate, tipo or None, categoria or None)
+    total = sum(r['total'] for r in resumo)
+    return render_template('financeiro/relatorios.html',
+        resumo=resumo, detalhe=detalhe, total=total,
+        modo=modo, mes=mes, ano=ano, de=de, ate=ate, tipo=tipo, categoria=categoria,
+        categorias=db.CONTA_CATEGORIAS)
+
 
 @app.route('/custos/contas/nova', methods=['POST'])
 def nova_conta_pagar():

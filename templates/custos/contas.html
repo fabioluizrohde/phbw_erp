@@ -2,9 +2,6 @@
 {% block titulo %}Contas a Pagar{% endblock %}
 {% block topbar_titulo %}Contas a Pagar{% endblock %}
 {% block topbar_acoes %}
-  <a href="{{ url_for('custos') }}" class="btn btn-outline">
-    <i data-lucide="arrow-left"></i> Central de Custos
-  </a>
   <button class="btn btn-primario" onclick="abrirModal('modal-nova-conta')">
     <i data-lucide="plus"></i> Nova Conta
   </button>
@@ -129,6 +126,9 @@
           </td>
           <td>
             <span style="font-weight:600">{{ c.descricao }}</span>
+            <span style="display:inline-block;font-size:.66rem;font-weight:700;padding:1px 7px;border-radius:20px;margin-left:5px;{% if c.tipo=='pessoal' %}background:rgba(139,92,246,.15);color:#8B5CF6;{% else %}background:rgba(100,116,139,.15);color:#64748b;{% endif %}">{% if c.tipo=='pessoal' %}👤 Pessoal{% else %}🏢 Empresa{% endif %}</span>
+            {% if c.recorrente %}<span title="Conta recorrente — entra no Ponto de Equilíbrio" style="display:inline-block;font-size:.66rem;font-weight:700;padding:1px 7px;border-radius:20px;margin-left:3px;background:rgba(14,165,233,.15);color:#0ea5e9;">🔁 Recorrente{% if c.recorrencia_fim %} até {{ c.recorrencia_fim[5:7] }}/{{ c.recorrencia_fim[:4] }}{% endif %}</span>{% endif %}
+            {% if c.categoria and c.categoria != 'outros' %}<span style="display:inline-block;font-size:.64rem;font-weight:600;padding:1px 7px;border-radius:20px;margin-left:3px;background:rgba(128,128,128,.12);color:var(--texto-muted);">{{ categorias.get(c.categoria, c.categoria) }}</span>{% endif %}
             {% if c.fornecedor %}<br><small class="text-muted">{{ c.fornecedor }}</small>{% endif %}
             {% if c.observacao %}<br><small class="text-muted">{{ c.observacao }}</small>{% endif %}
           </td>
@@ -160,7 +160,7 @@
               </button>
             </form>
             {% endif %}
-            <button class="btn btn-sm btn-outline" onclick="editarConta({{ c|tojson }})" title="Editar">
+            <button class="btn btn-sm btn-outline" onclick='editarConta({{ c|tojson }})' title="Editar">
               <i data-lucide="pencil" style="width:13px;height:13px"></i>
             </button>
             <form method="POST" action="{{ url_for('excluir_conta_pagar', id=c.id) }}" style="display:inline" onsubmit="return confirm('Excluir esta conta?')">
@@ -223,6 +223,39 @@
           </select>
         </div>
         <div class="form-group span2">
+          <label>Categoria</label>
+          <select name="categoria">
+            {% for k, v in categorias.items() %}<option value="{{ k }}" {% if k=='outros' %}selected{% endif %}>{{ v }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Tipo</label>
+          <select name="tipo">
+            <option value="empresa" selected>🏢 Conta da empresa</option>
+            <option value="pessoal">👤 Conta pessoal</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Recorrente?</label>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:400;cursor:pointer;padding-top:8px;">
+            <input type="checkbox" name="recorrente" value="1" style="width:auto;margin:0;"
+                   onchange="document.getElementById('grupo-fim-nova').style.display=this.checked?'block':'none'">
+            <span style="font-size:.85rem;">Todo mês — vira custo fixo no Ponto de Equilíbrio</span>
+          </label>
+        </div>
+        <div class="form-group span2" id="grupo-fim-nova" style="display:none;">
+          <label>Duração da recorrência</label>
+          <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;cursor:pointer;">
+              <input type="radio" name="recorrencia_tipo" value="sem_fim" checked style="width:auto;margin:0;"> ♾️ Não termina
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;cursor:pointer;">
+              <input type="radio" name="recorrencia_tipo" value="com_fim" style="width:auto;margin:0;"> 📅 Termina em
+            </label>
+            <input type="month" name="recorrencia_fim" style="width:auto;">
+          </div>
+        </div>
+        <div class="form-group span2">
           <label>Observação</label>
           <textarea name="observacao" placeholder="Número do boleto, nota, etc..."></textarea>
         </div>
@@ -278,6 +311,40 @@
           </select>
         </div>
         <div class="form-group span2">
+          <label>Categoria</label>
+          <select name="categoria" id="ec-categoria">
+            {% for k, v in categorias.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Tipo</label>
+          <select name="tipo" id="ec-tipo">
+            <option value="empresa">🏢 Conta da empresa</option>
+            <option value="pessoal">👤 Conta pessoal</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Recorrente?</label>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:400;cursor:pointer;padding-top:8px;">
+            <input type="checkbox" name="recorrente" id="ec-recorrente" value="1" style="width:auto;margin:0;"
+                   onchange="document.getElementById('grupo-fim-edit').style.display=this.checked?'block':'none'">
+            <span style="font-size:.85rem;">Todo mês — vira custo fixo no Ponto de Equilíbrio</span>
+          </label>
+          <small class="text-muted" style="font-size:.72rem;">Recorrente aparece sozinha nos próximos meses. Alterar o valor vale deste mês em diante.</small>
+        </div>
+        <div class="form-group span2" id="grupo-fim-edit" style="display:none;">
+          <label>Duração da recorrência</label>
+          <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;cursor:pointer;">
+              <input type="radio" name="recorrencia_tipo" value="sem_fim" id="ec-rec-semfim" style="width:auto;margin:0;"> ♾️ Não termina
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;cursor:pointer;">
+              <input type="radio" name="recorrencia_tipo" value="com_fim" id="ec-rec-comfim" style="width:auto;margin:0;"> 📅 Termina em
+            </label>
+            <input type="month" name="recorrencia_fim" id="ec-rec-fim" style="width:auto;">
+          </div>
+        </div>
+        <div class="form-group span2">
           <label>Observação</label>
           <textarea name="observacao" id="ec-obs"></textarea>
         </div>
@@ -310,6 +377,14 @@ function editarConta(c) {
   document.getElementById('ec-venc').value  = c.vencimento;
   document.getElementById('ec-valor').value = c.valor;
   document.getElementById('ec-forma').value = c.forma_pagamento;
+  document.getElementById('ec-tipo').value  = c.tipo || 'empresa';
+  document.getElementById('ec-categoria').value = c.categoria || 'outros';
+  document.getElementById('ec-recorrente').checked = !!(c.recorrente);
+  var _fim = c.recorrencia_fim || '';
+  document.getElementById('ec-rec-fim').value = _fim;
+  document.getElementById('ec-rec-comfim').checked = !!_fim;
+  document.getElementById('ec-rec-semfim').checked = !_fim;
+  document.getElementById('grupo-fim-edit').style.display = c.recorrente ? 'block' : 'none';
   document.getElementById('ec-obs').value   = c.observacao || '';
   document.getElementById('form-editar-conta').action = EDITAR_CONTA_BASE.replace('/0/', '/' + c.id + '/');
   abrirModal('modal-editar-conta');

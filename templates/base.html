@@ -59,11 +59,11 @@
       <a href="{{ url_for('caixa') }}" class="nav-item {% if 'caixa' in request.endpoint or 'lancamento' in request.endpoint %}ativo{% endif %}">
         <i data-lucide="wallet"></i> Caixa
       </a>
-      <a href="{{ url_for('custos') }}" class="nav-item {% if request.endpoint == 'custos' or 'despesa' in request.endpoint %}ativo{% endif %}">
-        <i data-lucide="trending-down"></i> Central de Custos
-      </a>
       <a href="{{ url_for('contas_pagar') }}" class="nav-item {% if 'conta' in request.endpoint and 'fornecedor' not in request.endpoint %}ativo{% endif %}">
         <i data-lucide="file-check-2"></i> Contas a Pagar
+      </a>
+      <a href="{{ url_for('relatorios_financeiros') }}" class="nav-item {% if request.endpoint == 'relatorios_financeiros' %}ativo{% endif %}">
+        <i data-lucide="bar-chart-3"></i> Relatórios
       </a>
       <a href="{{ url_for('fornecedores') }}" class="nav-item {% if 'fornecedor' in request.endpoint %}ativo{% endif %}">
         <i data-lucide="truck"></i> Fornecedores
